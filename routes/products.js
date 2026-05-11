@@ -155,17 +155,14 @@ const buildCloudynapRow = (category, body, specs, coverUrl, urls) => {
   }
 
   if (category === 'furniture') {
-    const priceText = normalizeString(body.price);
+    /** Pricing lives in `product_variants_furniture`; parent row matches public.furniture DDL. */
     return {
       ...base,
-      price: priceText || null,
-      length: pickCloudynapStr(specs, body, 'length'),
-      width: pickCloudynapStr(specs, body, 'width'),
-      height: pickCloudynapStr(specs, body, 'height'),
-      structure: pickCloudynapStr(specs, body, 'structure'),
+      brand: pickCloudynapStr(specs, body, 'brand'),
+      series: pickCloudynapStr(specs, body, 'series'),
+      features: pickCloudynapStr(specs, body, 'features'),
+      benefits: pickCloudynapStr(specs, body, 'benefits'),
       fabric: pickCloudynapStr(specs, body, 'fabric'),
-      seats: pickCloudynapInt(specs, body, 'seats'),
-      material: pickCloudynapStr(specs, body, 'material'),
       warranty: pickCloudynapStr(specs, body, 'warranty'),
     };
   }
@@ -239,6 +236,22 @@ const enrichSofacumbedCatalogRow = (row) => {
   else if (raw && typeof raw === 'object') variants = [raw];
   const rest = { ...row };
   delete rest.product_variants_sofacumbed;
+  const prices = variants
+    .map((v) => coercePriceValue(v?.price))
+    .filter((n) => n !== null && Number.isFinite(n));
+  const minPrice = prices.length ? Math.min(...prices) : null;
+  return { ...rest, variants, price: minPrice };
+};
+
+/** PKR + option label live in `product_variants_furniture` (`furniture_id` FK). */
+const enrichFurnitureCatalogRow = (row) => {
+  if (!row || typeof row !== 'object') return row;
+  const raw = row.product_variants_furniture;
+  let variants = [];
+  if (Array.isArray(raw)) variants = raw;
+  else if (raw && typeof raw === 'object') variants = [raw];
+  const rest = { ...row };
+  delete rest.product_variants_furniture;
   const prices = variants
     .map((v) => coercePriceValue(v?.price))
     .filter((n) => n !== null && Number.isFinite(n));
@@ -369,6 +382,49 @@ const sanitizedRowToSofacumbedVariant = (sanitized) => {
   };
 };
 
+const normalizeFurnitureVariantForDb = (entry) => {
+  if (!entry || typeof entry !== 'object') return null;
+  const price = coercePriceValue(entry.price);
+  if (price === null) return null;
+  const optionName = normalizeString(entry.option_name ?? entry.optionName);
+  if (!optionName) return null;
+  return {
+    option_name: optionName,
+    price: Math.round(price),
+  };
+};
+
+const replaceFurnitureVariants = async (furnitureId, normalizedVariants) => {
+  const { error: delErr } = await supabase
+    .from('product_variants_furniture')
+    .delete()
+    .eq('furniture_id', furnitureId);
+  if (delErr) throw delErr;
+  if (!normalizedVariants.length) return;
+  const rows = normalizedVariants.map((v) => ({
+    furniture_id: furnitureId,
+    option_name: v.option_name,
+    price: v.price,
+  }));
+  const { error: insErr } = await supabase.from('product_variants_furniture').insert(rows);
+  if (insErr) throw insErr;
+};
+
+const fetchFurnitureWithVariants = async (id) => {
+  const { data: row, error: rowErr } = await supabase.from('furniture').select('*').eq('id', id).maybeSingle();
+  if (rowErr) throw rowErr;
+  if (!row) return null;
+  const { data: variantRows, error: varErr } = await supabase
+    .from('product_variants_furniture')
+    .select('*')
+    .eq('furniture_id', id);
+  if (varErr) throw varErr;
+  return enrichFurnitureCatalogRow({
+    ...row,
+    product_variants_furniture: Array.isArray(variantRows) ? variantRows : [],
+  });
+};
+
 router.get('/', async (req, res) => {
   try {
     if (!supabase) {
@@ -489,6 +545,32 @@ router.get('/', async (req, res) => {
           enrichSofacumbedCatalogRow({
             ...r,
             product_variants_sofacumbed: variantByProductId[r.id] || [],
+          }),
+        );
+      }
+      if (table === 'furniture') {
+        const parents = data || [];
+        const ids = parents.map((p) => p.id).filter((pid) => pid != null);
+        const variantByProductId = {};
+        if (ids.length) {
+          const { data: allVar, error: varErr } = await supabase
+            .from('product_variants_furniture')
+            .select('*')
+            .in('furniture_id', ids);
+          if (varErr) {
+            console.error(`Failed to fetch ${table} variants:`, varErr);
+            return res.status(500).json({ error: 'Failed to fetch products' });
+          }
+          for (const v of allVar || []) {
+            const fid = v.furniture_id;
+            if (!variantByProductId[fid]) variantByProductId[fid] = [];
+            variantByProductId[fid].push(v);
+          }
+        }
+        rows = attachType(parents, type).map((r) =>
+          enrichFurnitureCatalogRow({
+            ...r,
+            product_variants_furniture: variantByProductId[r.id] || [],
           }),
         );
       }
@@ -900,18 +982,15 @@ const CLOUDYNAP_CSV_ALLOWED = {
   ],
   furniture: [
     'name',
-    'price',
     'description',
-    'seats',
-    'material',
+    'brand',
+    'series',
+    'features',
+    'benefits',
+    'fabric',
     'warranty',
     'image',
     'image_urls',
-    'width',
-    'length',
-    'height',
-    'structure',
-    'fabric',
   ],
   sofacumbed: [
     'name',
@@ -1190,9 +1269,97 @@ router.post('/', upload.array('images', 10), async (req, res) => {
         return res.status(201).json({ product: { ...full, type: category } });
       }
 
+      if (category === 'furniture') {
+        if (!name) {
+          return res.status(400).json({ error: 'Product name is required.' });
+        }
+
+        const specsPayload = parseSpecsPayload(req.body.specs);
+        const variantEntries = parseBedVariantsFromInputs(specsPayload, req.body)
+          .map(normalizeFurnitureVariantForDb)
+          .filter(Boolean);
+        if (!variantEntries.length) {
+          return res.status(400).json({
+            error: 'Add at least one furniture option with a name and valid price (PKR).',
+          });
+        }
+
+        const files = req.files || [];
+        if (!files.length) {
+          return res.status(400).json({ error: 'Please upload at least one product image.' });
+        }
+
+        const { urls, coverUrl } = await uploadImages(category, files);
+        if (!coverUrl) {
+          return res.status(500).json({ error: 'Unable to determine cover image URL.' });
+        }
+
+        const insertPayload = buildCloudynapRow(category, req.body, specsPayload, coverUrl, urls);
+
+        const { data, error } = await supabase.from('furniture').insert(insertPayload).select('*').single();
+
+        if (error) {
+          console.error('Failed to create Cloudynap product:', error);
+          return res.status(500).json({
+            error:
+              error?.message ||
+              error?.details ||
+              error?.hint ||
+              'Failed to create product. Check column types and Storage: set SUPABASE_STORAGE_CATALOG_BUCKET to your bucket id, bucket must exist and allow uploads.',
+          });
+        }
+
+        try {
+          await replaceFurnitureVariants(data.id, variantEntries);
+        } catch (variantErr) {
+          console.error('Failed to insert furniture variants:', variantErr);
+          await supabase.from('furniture').delete().eq('id', data.id);
+          return res.status(500).json({
+            error: variantErr?.message || 'Failed to save furniture options/prices.',
+          });
+        }
+
+        let full;
+        try {
+          full = await fetchFurnitureWithVariants(data.id);
+        } catch (fetchErr) {
+          console.error('Failed to load furniture after create:', fetchErr);
+          full = { ...data, variants: [], price: null };
+        }
+
+        const userFromBody = req.body?.cmsUserId || req.body?.cmsUserName || req.body?.cmsUserRole
+          ? {
+              userId: req.body.cmsUserId,
+              userName: req.body.cmsUserName,
+              userRole: req.body.cmsUserRole,
+            }
+          : null;
+
+        await logActivity(
+          {
+            type: 'product_created',
+            action: `Created new ${category}: ${full.name || name}`,
+            entityType: 'product',
+            entityId: full.id,
+            entityName: full.name || name,
+            details: { category, price: full.price },
+            userId: userFromBody?.userId,
+            userName: userFromBody?.userName,
+            userRole: userFromBody?.userRole,
+          },
+          req,
+        );
+
+        return res.status(201).json({ product: { ...full, type: category } });
+      }
+
       const priceRaw = normalizeString(req.body.price);
-      if (!name || !priceRaw) {
-        return res.status(400).json({ error: 'Product name and price are required.' });
+      if (!name) {
+        return res.status(400).json({ error: 'Product name is required.' });
+      }
+      /** Accessories require numeric PKR on the parent row. */
+      if (category === 'accessory' && !priceRaw) {
+        return res.status(400).json({ error: 'Price is required.' });
       }
 
       const specsPayload = parseSpecsPayload(req.body.specs);
@@ -1751,7 +1918,7 @@ router.post('/bulk/csv', upload.single('file'), async (req, res) => {
 
         const missing = [];
         if (!normalizeString(sanitized.name)) missing.push('name');
-        if (!cloudynapCsvHasPrice(cloudCat, sanitized)) missing.push('price');
+        if (cloudCat !== 'furniture' && !cloudynapCsvHasPrice(cloudCat, sanitized)) missing.push('price');
         if (!cloudynapCsvHasImage(sanitized)) missing.push('image or image_urls');
 
         if (missing.length) {
@@ -2214,8 +2381,108 @@ router.patch('/:category/:id', upload.array('images', 10), async (req, res) => {
         return res.json({ product: { ...full, type: cloudCat } });
       }
 
+      if (cloudCat === 'furniture') {
+        const variantEntries = parseBedVariantsFromInputs(specsPayload, req.body)
+          .map(normalizeFurnitureVariantForDb)
+          .filter(Boolean);
+        if (!variantEntries.length) {
+          return res.status(400).json({
+            error: 'At least one furniture option with a name and valid price (PKR) is required.',
+          });
+        }
+
+        const existingImages = parseExistingImages(req.body.existingImages);
+        const files = req.files || [];
+
+        let uploadedUrls = [];
+        if (files.length) {
+          const uploads = await uploadImages(cloudCat, files);
+          uploadedUrls = uploads.urls;
+        }
+
+        let finalImages = [...existingImages, ...uploadedUrls]
+          .map((url) => (typeof url === 'string' ? url.trim() : ''))
+          .filter((url, index, array) => url && array.indexOf(url) === index);
+
+        if (!finalImages.length) {
+          return res.status(400).json({ error: 'At least one product image is required.' });
+        }
+
+        const coverExisting = normalizeString(req.body.coverExisting);
+        const coverNewIndex =
+          req.body.coverNewIndex !== undefined && req.body.coverNewIndex !== null
+            ? Number(req.body.coverNewIndex)
+            : null;
+
+        let coverImage = '';
+        if (coverExisting && finalImages.includes(coverExisting)) {
+          coverImage = coverExisting;
+        } else if (
+          Number.isInteger(coverNewIndex) &&
+          coverNewIndex >= 0 &&
+          coverNewIndex < uploadedUrls.length
+        ) {
+          coverImage = uploadedUrls[coverNewIndex];
+        } else if (existingImages.length && finalImages.includes(existingImages[0])) {
+          coverImage = existingImages[0];
+        } else {
+          coverImage = finalImages[0];
+        }
+
+        const updatePayload = buildCloudynapRow(cloudCat, req.body, specsPayload, coverImage, finalImages);
+
+        const { data, error } = await supabase
+          .from('furniture')
+          .update(updatePayload)
+          .eq('id', lookupId)
+          .select('*')
+          .single();
+
+        if (error) {
+          console.error('Failed to update Cloudynap product:', error);
+          return res.status(500).json({
+            error:
+              error?.message ||
+              error?.details ||
+              error?.hint ||
+              'Failed to update product.',
+          });
+        }
+
+        try {
+          await replaceFurnitureVariants(lookupId, variantEntries);
+        } catch (variantErr) {
+          console.error('Failed to update furniture variants:', variantErr);
+          return res.status(500).json({
+            error: variantErr?.message || 'Failed to update furniture options/prices.',
+          });
+        }
+
+        let full;
+        try {
+          full = await fetchFurnitureWithVariants(lookupId);
+        } catch (fetchErr) {
+          full = { ...data, variants: [], price: null };
+        }
+
+        await logActivity(
+          {
+            type: 'product_updated',
+            action: `Updated ${cloudCat}: ${full.name || name}`,
+            entityType: 'product',
+            entityId: lookupId,
+            entityName: full.name || name,
+            details: { category: cloudCat },
+          },
+          req,
+        );
+
+        return res.json({ product: { ...full, type: cloudCat } });
+      }
+
       const priceRaw = normalizeString(req.body.price);
-      if (!priceRaw) {
+      /** Accessories require PKR on the parent row. */
+      if (cloudCat === 'accessory' && !priceRaw) {
         return res.status(400).json({ error: 'Price is required.' });
       }
 
