@@ -37,6 +37,24 @@ const enrichSofacumbedCatalogRow = (row) => {
   return { ...rest, variants, price: minPrice };
 };
 
+const enrichFurnitureCatalogRow = (row) => {
+  if (!row || typeof row !== 'object') return row;
+  const raw = row.product_variants_furniture;
+  let variants = [];
+  if (Array.isArray(raw)) variants = raw;
+  else if (raw && typeof raw === 'object') variants = [raw];
+  const rest = { ...row };
+  delete rest.product_variants_furniture;
+  const prices = variants
+    .map((v) => {
+      const n = v?.price != null ? Number(v.price) : NaN;
+      return Number.isFinite(n) ? n : null;
+    })
+    .filter((n) => n !== null);
+  const minPrice = prices.length ? Math.min(...prices) : null;
+  return { ...rest, variants, price: minPrice };
+};
+
 /** Maps API type segment → Supabase table name */
 const TYPE_TABLE = {
   bed: 'beds',
@@ -103,6 +121,30 @@ router.get('/:type/:id', async (req, res) => {
       const enriched = enrichSofacumbedCatalogRow({
         ...row,
         product_variants_sofacumbed: Array.isArray(variantRows) ? variantRows : [],
+      });
+      return res.json({ ...enriched, type });
+    }
+
+    if (table === 'furniture') {
+      const { data: row, error: rowErr } = await supabase.from('furniture').select('*').eq('id', id).maybeSingle();
+      if (rowErr) {
+        console.error('catalog fetch error:', rowErr);
+        return res.status(500).json({ error: 'Failed to fetch product' });
+      }
+      if (!row) {
+        return res.status(404).json({ error: 'Product not found' });
+      }
+      const { data: variantRows, error: varErr } = await supabase
+        .from('product_variants_furniture')
+        .select('*')
+        .eq('furniture_id', id);
+      if (varErr) {
+        console.error('catalog furniture variants fetch error:', varErr);
+        return res.status(500).json({ error: 'Failed to fetch product' });
+      }
+      const enriched = enrichFurnitureCatalogRow({
+        ...row,
+        product_variants_furniture: Array.isArray(variantRows) ? variantRows : [],
       });
       return res.json({ ...enriched, type });
     }
