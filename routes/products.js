@@ -2385,11 +2385,6 @@ router.patch('/:category/:id', upload.array('images', 10), async (req, res) => {
         const variantEntries = parseBedVariantsFromInputs(specsPayload, req.body)
           .map(normalizeFurnitureVariantForDb)
           .filter(Boolean);
-        if (!variantEntries.length) {
-          return res.status(400).json({
-            error: 'At least one furniture option with a name and valid price (PKR) is required.',
-          });
-        }
 
         const existingImages = parseExistingImages(req.body.existingImages);
         const files = req.files || [];
@@ -2449,13 +2444,15 @@ router.patch('/:category/:id', upload.array('images', 10), async (req, res) => {
           });
         }
 
-        try {
-          await replaceFurnitureVariants(lookupId, variantEntries);
-        } catch (variantErr) {
-          console.error('Failed to update furniture variants:', variantErr);
-          return res.status(500).json({
-            error: variantErr?.message || 'Failed to update furniture options/prices.',
-          });
+        if (variantEntries.length > 0) {
+          try {
+            await replaceFurnitureVariants(lookupId, variantEntries);
+          } catch (variantErr) {
+            console.error('Failed to update furniture variants:', variantErr);
+            return res.status(500).json({
+              error: variantErr?.message || 'Failed to update furniture options/prices.',
+            });
+          }
         }
 
         let full;
