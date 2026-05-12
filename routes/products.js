@@ -7,6 +7,11 @@ const { logActivity } = require('./activities');
 const catalogDealsModule = require('./catalogDeals');
 const rowToDealProduct = catalogDealsModule.rowToDealProduct;
 const isMissingDealsTable = catalogDealsModule.isMissingTableError;
+const {
+  parseImageUrls,
+  reorderGalleryUrlsCoverFirst,
+  normalizeCloudynapGalleryFields,
+} = require('../lib/cloudynapGallery');
 
 const router = express.Router();
 
@@ -485,6 +490,7 @@ router.get('/', async (req, res) => {
 
       if (error) {
         if (isMissingDealsTable(error)) {
+          res.set('Cache-Control', 'no-store');
           return res.json([]);
         }
         console.error('Failed to fetch catalog_deals:', error);
@@ -502,12 +508,14 @@ router.get('/', async (req, res) => {
       if (applyLimit) {
         rows = rows.slice(0, parsedLimit);
       }
+      res.set('Cache-Control', 'no-store');
       return res.json(rows);
     }
 
     const plans = resolveCloudynapPlans(subcategory, category);
 
     if (plans.length === 0) {
+      res.set('Cache-Control', 'no-store');
       return res.json([]);
     }
 
@@ -592,7 +600,7 @@ router.get('/', async (req, res) => {
         );
       }
       /** `pillows` and `accessories` both resolve to the `accessories` table above — no extra name filter. */
-      combined = combined.concat(rows);
+      combined = combined.concat(rows.map((r) => normalizeCloudynapGalleryFields(r)));
     }
 
     if (sortConfig?.key === 'price') {
@@ -625,6 +633,7 @@ router.get('/', async (req, res) => {
       combined = combined.slice(0, parsedLimit);
     }
 
+    res.set('Cache-Control', 'no-store');
     res.json(combined);
   } catch (err) {
     console.error('Unexpected error fetching products:', err);
@@ -868,48 +877,6 @@ const parseExistingImages = (raw) => {
   } catch (error) {
     return [];
   }
-  return [];
-};
-
-/** Persist gallery with cover URL first so consumers using `image_urls[0]` match `image`. */
-const reorderGalleryUrlsCoverFirst = (urls, coverUrl) => {
-  if (!Array.isArray(urls) || !urls.length) return urls;
-  const cover = typeof coverUrl === 'string' ? coverUrl.trim() : '';
-  if (!cover || !urls.includes(cover)) return urls;
-  return [cover, ...urls.filter((u) => u !== cover)];
-};
-
-const parseImageUrls = (raw) => {
-  if (raw === undefined || raw === null) return [];
-  if (Array.isArray(raw)) {
-    return raw
-      .map((value) => (typeof value === 'string' ? value.trim() : String(value || '').trim()))
-      .filter((value) => value);
-  }
-
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim();
-    if (!trimmed) return [];
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        return parsed
-          .map((value) => (typeof value === 'string' ? value.trim() : String(value || '').trim()))
-          .filter((value) => value);
-      }
-    } catch (error) {
-      // fall through to delimiter split
-    }
-    return trimmed
-      .split(/[;,|]/)
-      .map((value) => value.trim())
-      .filter((value) => value);
-  }
-
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    return [String(raw)];
-  }
-
   return [];
 };
 
