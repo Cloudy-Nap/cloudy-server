@@ -3,6 +3,36 @@ const { getSupabase } = require('../lib/supabaseServer');
 
 const router = express.Router();
 
+/** Same rules as `routes/products.js` — `Number("45800")` works but commas/formats need stripping. */
+const coercePriceValue = (value) => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'bigint') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/[^\d.-]/g, '');
+    if (!cleaned) return null;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
+/** Bigint/int PKs: compare as number when URL param is `"9"` so FK joins match reliably. */
+const normalizeNumericRouteId = (raw) => {
+  if (raw === null || raw === undefined) return raw;
+  const s = String(raw).trim();
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    return Number.isSafeInteger(n) ? n : s;
+  }
+  return raw;
+};
+
 /** Mirrors `routes/products` enrich for variant rows on JSON responses. */
 const enrichBedCatalogRow = (row) => {
   if (!row || typeof row !== 'object') return row;
@@ -10,11 +40,8 @@ const enrichBedCatalogRow = (row) => {
   const rest = { ...row };
   delete rest.product_variants_bed;
   const prices = variants
-    .map((v) => {
-      const n = v?.price != null ? Number(v.price) : NaN;
-      return Number.isFinite(n) ? n : null;
-    })
-    .filter((n) => n !== null);
+    .map((v) => coercePriceValue(v?.price))
+    .filter((n) => n !== null && Number.isFinite(n));
   const minPrice = prices.length ? Math.min(...prices) : null;
   return { ...rest, variants, price: minPrice };
 };
@@ -28,11 +55,8 @@ const enrichSofacumbedCatalogRow = (row) => {
   const rest = { ...row };
   delete rest.product_variants_sofacumbed;
   const prices = variants
-    .map((v) => {
-      const n = v?.price != null ? Number(v.price) : NaN;
-      return Number.isFinite(n) ? n : null;
-    })
-    .filter((n) => n !== null);
+    .map((v) => coercePriceValue(v?.price))
+    .filter((n) => n !== null && Number.isFinite(n));
   const minPrice = prices.length ? Math.min(...prices) : null;
   return { ...rest, variants, price: minPrice };
 };
@@ -46,11 +70,8 @@ const enrichFurnitureCatalogRow = (row) => {
   const rest = { ...row };
   delete rest.product_variants_furniture;
   const prices = variants
-    .map((v) => {
-      const n = v?.price != null ? Number(v.price) : NaN;
-      return Number.isFinite(n) ? n : null;
-    })
-    .filter((n) => n !== null);
+    .map((v) => coercePriceValue(v?.price))
+    .filter((n) => n !== null && Number.isFinite(n));
   const minPrice = prices.length ? Math.min(...prices) : null;
   return { ...rest, variants, price: minPrice };
 };
@@ -68,7 +89,11 @@ router.get('/:type/:id', async (req, res) => {
   try {
     const supabase = getSupabase();
     const type = String(req.params.type || '').toLowerCase();
-    const id = req.params.id;
+    const idParam = req.params.id;
+    const id =
+      type === 'bed' || type === 'sofacumbed' || type === 'furniture'
+        ? normalizeNumericRouteId(idParam)
+        : idParam;
     const table = TYPE_TABLE[type];
 
     if (!table) {
