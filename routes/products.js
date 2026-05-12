@@ -55,6 +55,35 @@ const coercePriceValue = (value) => {
   return null;
 };
 
+/** PostgREST / proxy limits can break huge `.in()` filters — fetch variants in chunks. */
+const VARIANT_PARENT_ID_CHUNK = 100;
+
+async function fetchCatalogVariantsChunked(supabaseClient, table, fkColumn, parentIds) {
+  const ids = [...new Set((parentIds || []).filter((id) => id != null))];
+  if (!ids.length) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += VARIANT_PARENT_ID_CHUNK) {
+    const chunk = ids.slice(i, i + VARIANT_PARENT_ID_CHUNK);
+    const { data, error } = await supabaseClient.from(table).select('*').in(fkColumn, chunk);
+    if (error) throw error;
+    if (Array.isArray(data) && data.length) out.push(...data);
+  }
+  return out;
+}
+
+/** Normalize FK so `beds.id` and `product_variants_bed.product_id` match after int8/string coercion. */
+function groupVariantsByFk(rows, fkColumn) {
+  const map = {};
+  for (const v of rows || []) {
+    const raw = v?.[fkColumn];
+    if (raw === undefined || raw === null) continue;
+    const k = String(raw);
+    if (!map[k]) map[k] = [];
+    map[k].push(v);
+  }
+  return map;
+}
+
 const attachType = (records, type) => {
   if (!Array.isArray(records)) return [];
   return records.map((item) => ({
@@ -499,78 +528,75 @@ router.get('/', async (req, res) => {
       if (table === 'beds') {
         const parents = data || [];
         const ids = parents.map((p) => p.id).filter((pid) => pid != null);
-        const variantByProductId = {};
+        let variantByProductId = {};
         if (ids.length) {
-          const { data: allVar, error: varErr } = await supabase
-            .from('product_variants_bed')
-            .select('*')
-            .in('product_id', ids);
-          if (varErr) {
+          try {
+            const allVar = await fetchCatalogVariantsChunked(
+              supabase,
+              'product_variants_bed',
+              'product_id',
+              ids,
+            );
+            variantByProductId = groupVariantsByFk(allVar, 'product_id');
+          } catch (varErr) {
             console.error(`Failed to fetch ${table} variants:`, varErr);
             return res.status(500).json({ error: 'Failed to fetch products' });
-          }
-          for (const v of allVar || []) {
-            const pid = v.product_id;
-            if (!variantByProductId[pid]) variantByProductId[pid] = [];
-            variantByProductId[pid].push(v);
           }
         }
         rows = attachType(parents, type).map((r) =>
           enrichBedCatalogRow({
             ...r,
-            product_variants_bed: variantByProductId[r.id] || [],
+            product_variants_bed: variantByProductId[String(r.id)] || [],
           }),
         );
       }
       if (table === 'sofacumbed') {
         const parents = data || [];
         const ids = parents.map((p) => p.id).filter((pid) => pid != null);
-        const variantByProductId = {};
+        let variantByProductId = {};
         if (ids.length) {
-          const { data: allVar, error: varErr } = await supabase
-            .from('product_variants_sofacumbed')
-            .select('*')
-            .in('product_id', ids);
-          if (varErr) {
+          try {
+            const allVar = await fetchCatalogVariantsChunked(
+              supabase,
+              'product_variants_sofacumbed',
+              'product_id',
+              ids,
+            );
+            variantByProductId = groupVariantsByFk(allVar, 'product_id');
+          } catch (varErr) {
             console.error(`Failed to fetch ${table} variants:`, varErr);
             return res.status(500).json({ error: 'Failed to fetch products' });
-          }
-          for (const v of allVar || []) {
-            const pid = v.product_id;
-            if (!variantByProductId[pid]) variantByProductId[pid] = [];
-            variantByProductId[pid].push(v);
           }
         }
         rows = attachType(parents, type).map((r) =>
           enrichSofacumbedCatalogRow({
             ...r,
-            product_variants_sofacumbed: variantByProductId[r.id] || [],
+            product_variants_sofacumbed: variantByProductId[String(r.id)] || [],
           }),
         );
       }
       if (table === 'furniture') {
         const parents = data || [];
         const ids = parents.map((p) => p.id).filter((pid) => pid != null);
-        const variantByProductId = {};
+        let variantByProductId = {};
         if (ids.length) {
-          const { data: allVar, error: varErr } = await supabase
-            .from('product_variants_furniture')
-            .select('*')
-            .in('furniture_id', ids);
-          if (varErr) {
+          try {
+            const allVar = await fetchCatalogVariantsChunked(
+              supabase,
+              'product_variants_furniture',
+              'furniture_id',
+              ids,
+            );
+            variantByProductId = groupVariantsByFk(allVar, 'furniture_id');
+          } catch (varErr) {
             console.error(`Failed to fetch ${table} variants:`, varErr);
             return res.status(500).json({ error: 'Failed to fetch products' });
-          }
-          for (const v of allVar || []) {
-            const fid = v.furniture_id;
-            if (!variantByProductId[fid]) variantByProductId[fid] = [];
-            variantByProductId[fid].push(v);
           }
         }
         rows = attachType(parents, type).map((r) =>
           enrichFurnitureCatalogRow({
             ...r,
-            product_variants_furniture: variantByProductId[r.id] || [],
+            product_variants_furniture: variantByProductId[String(r.id)] || [],
           }),
         );
       }
