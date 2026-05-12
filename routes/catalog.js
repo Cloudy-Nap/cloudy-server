@@ -1,5 +1,6 @@
 const express = require('express');
 const { getSupabase } = require('../lib/supabaseServer');
+const { normalizeCloudynapGalleryFields } = require('../lib/cloudynapGallery');
 
 const router = express.Router();
 
@@ -122,7 +123,8 @@ router.get('/:type/:id', async (req, res) => {
         ...row,
         product_variants_bed: Array.isArray(variantRows) ? variantRows : [],
       });
-      return res.json({ ...enriched, type });
+      res.set('Cache-Control', 'no-store');
+      return res.json(normalizeCloudynapGalleryFields({ ...enriched, type }));
     }
 
     if (table === 'sofacumbed') {
@@ -147,7 +149,8 @@ router.get('/:type/:id', async (req, res) => {
         ...row,
         product_variants_sofacumbed: Array.isArray(variantRows) ? variantRows : [],
       });
-      return res.json({ ...enriched, type });
+      res.set('Cache-Control', 'no-store');
+      return res.json(normalizeCloudynapGalleryFields({ ...enriched, type }));
     }
 
     if (table === 'furniture') {
@@ -171,7 +174,8 @@ router.get('/:type/:id', async (req, res) => {
         ...row,
         product_variants_furniture: Array.isArray(variantRows) ? variantRows : [],
       });
-      return res.json({ ...enriched, type });
+      res.set('Cache-Control', 'no-store');
+      return res.json(normalizeCloudynapGalleryFields({ ...enriched, type }));
     }
 
     const { data, error } = await supabase.from(table).select('*').eq('id', id).maybeSingle();
@@ -185,6 +189,7 @@ router.get('/:type/:id', async (req, res) => {
     }
 
     if (table === 'catalog_deals') {
+      res.set('Cache-Control', 'no-store');
       return res.json({
         ...data,
         type: 'deal',
@@ -194,7 +199,8 @@ router.get('/:type/:id', async (req, res) => {
       });
     }
 
-    res.json({ ...data, type });
+    res.set('Cache-Control', 'no-store');
+    res.json(normalizeCloudynapGalleryFields({ ...data, type }));
   } catch (err) {
     if (err.code === 'SUPABASE_CONFIG') {
       return res.status(503).json({ error: err.message });
