@@ -55,18 +55,27 @@ const coercePriceValue = (value) => {
   return null;
 };
 
-/** PostgREST / proxy limits can break huge `.in()` filters — fetch variants in chunks. */
-const VARIANT_PARENT_ID_CHUNK = 100;
+/** PostgREST returns at most ~1000 rows per request by default — always paginate full reads. */
+const VARIANT_PAGE_SIZE = 1000;
 
-async function fetchCatalogVariantsChunked(supabaseClient, table, fkColumn, parentIds) {
-  const ids = [...new Set((parentIds || []).filter((id) => id != null))];
-  if (!ids.length) return [];
+/**
+ * Load every row from a variant table (paginated). Catalog variant tables are small (low thousands);
+ * this avoids `.in(product_id, …)` truncation and URL limits so every parent id gets its SKUs (e.g. bed id 2).
+ */
+async function fetchEntireVariantTablePaginated(supabaseClient, table, orderColumn = 'id') {
+  let from = 0;
   const out = [];
-  for (let i = 0; i < ids.length; i += VARIANT_PARENT_ID_CHUNK) {
-    const chunk = ids.slice(i, i + VARIANT_PARENT_ID_CHUNK);
-    const { data, error } = await supabaseClient.from(table).select('*').in(fkColumn, chunk);
+  for (;;) {
+    const { data, error } = await supabaseClient
+      .from(table)
+      .select('*')
+      .order(orderColumn, { ascending: true })
+      .range(from, from + VARIANT_PAGE_SIZE - 1);
     if (error) throw error;
-    if (Array.isArray(data) && data.length) out.push(...data);
+    const rows = Array.isArray(data) ? data : [];
+    out.push(...rows);
+    if (rows.length < VARIANT_PAGE_SIZE) break;
+    from += VARIANT_PAGE_SIZE;
   }
   return out;
 }
@@ -527,16 +536,10 @@ router.get('/', async (req, res) => {
       let rows = attachType(data || [], type);
       if (table === 'beds') {
         const parents = data || [];
-        const ids = parents.map((p) => p.id).filter((pid) => pid != null);
         let variantByProductId = {};
-        if (ids.length) {
+        if (parents.length) {
           try {
-            const allVar = await fetchCatalogVariantsChunked(
-              supabase,
-              'product_variants_bed',
-              'product_id',
-              ids,
-            );
+            const allVar = await fetchEntireVariantTablePaginated(supabase, 'product_variants_bed');
             variantByProductId = groupVariantsByFk(allVar, 'product_id');
           } catch (varErr) {
             console.error(`Failed to fetch ${table} variants:`, varErr);
@@ -552,16 +555,10 @@ router.get('/', async (req, res) => {
       }
       if (table === 'sofacumbed') {
         const parents = data || [];
-        const ids = parents.map((p) => p.id).filter((pid) => pid != null);
         let variantByProductId = {};
-        if (ids.length) {
+        if (parents.length) {
           try {
-            const allVar = await fetchCatalogVariantsChunked(
-              supabase,
-              'product_variants_sofacumbed',
-              'product_id',
-              ids,
-            );
+            const allVar = await fetchEntireVariantTablePaginated(supabase, 'product_variants_sofacumbed');
             variantByProductId = groupVariantsByFk(allVar, 'product_id');
           } catch (varErr) {
             console.error(`Failed to fetch ${table} variants:`, varErr);
@@ -577,16 +574,10 @@ router.get('/', async (req, res) => {
       }
       if (table === 'furniture') {
         const parents = data || [];
-        const ids = parents.map((p) => p.id).filter((pid) => pid != null);
         let variantByProductId = {};
-        if (ids.length) {
+        if (parents.length) {
           try {
-            const allVar = await fetchCatalogVariantsChunked(
-              supabase,
-              'product_variants_furniture',
-              'furniture_id',
-              ids,
-            );
+            const allVar = await fetchEntireVariantTablePaginated(supabase, 'product_variants_furniture');
             variantByProductId = groupVariantsByFk(allVar, 'furniture_id');
           } catch (varErr) {
             console.error(`Failed to fetch ${table} variants:`, varErr);
