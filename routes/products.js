@@ -871,6 +871,14 @@ const parseExistingImages = (raw) => {
   return [];
 };
 
+/** Persist gallery with cover URL first so consumers using `image_urls[0]` match `image`. */
+const reorderGalleryUrlsCoverFirst = (urls, coverUrl) => {
+  if (!Array.isArray(urls) || !urls.length) return urls;
+  const cover = typeof coverUrl === 'string' ? coverUrl.trim() : '';
+  if (!cover || !urls.includes(cover)) return urls;
+  return [cover, ...urls.filter((u) => u !== cover)];
+};
+
 const parseImageUrls = (raw) => {
   if (raw === undefined || raw === null) return [];
   if (Array.isArray(raw)) {
@@ -2248,6 +2256,8 @@ router.patch('/:category/:id', upload.array('images', 10), async (req, res) => {
           coverImage = finalImages[0];
         }
 
+        finalImages = reorderGalleryUrlsCoverFirst(finalImages, coverImage);
+
         const updatePayload = buildCloudynapRow(cloudCat, req.body, specsPayload, coverImage, finalImages);
 
         const { data, error } = await supabase
@@ -2347,6 +2357,8 @@ router.patch('/:category/:id', upload.array('images', 10), async (req, res) => {
           coverImage = finalImages[0];
         }
 
+        finalImages = reorderGalleryUrlsCoverFirst(finalImages, coverImage);
+
         const updatePayload = buildCloudynapRow(cloudCat, req.body, specsPayload, coverImage, finalImages);
 
         const { data, error } = await supabase
@@ -2440,6 +2452,8 @@ router.patch('/:category/:id', upload.array('images', 10), async (req, res) => {
         } else {
           coverImage = finalImages[0];
         }
+
+        finalImages = reorderGalleryUrlsCoverFirst(finalImages, coverImage);
 
         const updatePayload = buildCloudynapRow(cloudCat, req.body, specsPayload, coverImage, finalImages);
 
@@ -2537,6 +2551,8 @@ router.patch('/:category/:id', upload.array('images', 10), async (req, res) => {
       } else {
         coverImage = finalImages[0];
       }
+
+      finalImages = reorderGalleryUrlsCoverFirst(finalImages, coverImage);
 
       const updatePayload = buildCloudynapRow(cloudCat, req.body, specsPayload, coverImage, finalImages);
 
