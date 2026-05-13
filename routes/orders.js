@@ -131,9 +131,13 @@ router.post('/', async (req, res) => {
       phoneNumber,
     } = req.body;
 
-    if (!userId || !items.length) {
-      return res.status(400).json({ error: 'userId and at least one item are required' });
+    const normalizedItems = Array.isArray(items) ? items : [];
+    if (!normalizedItems.length) {
+      return res.status(400).json({ error: 'At least one order item is required' });
     }
+
+    const resolvedUserId =
+      userId === undefined || userId === null || userId === '' ? null : userId;
 
     const normalizedStatus = normalizeStatus(status);
 
@@ -187,8 +191,18 @@ router.post('/', async (req, res) => {
       billingAddressObject?.phone,
     );
 
+    if (!resolvedUserId) {
+      const hasEmail = resolvedCustomerEmail && String(resolvedCustomerEmail).trim();
+      const hasPhone = resolvedCustomerPhone && String(resolvedCustomerPhone).trim();
+      if (!hasEmail && !hasPhone) {
+        return res.status(400).json({
+          error: 'Guest checkout requires a customer email or phone number on the order.',
+        });
+      }
+    }
+
     const insertPayload = {
-      user_id: userId,
+      user_id: resolvedUserId,
       status: normalizedStatus,
       subtotal: totals.subtotal || 0,
       tax: totals.tax || 0,
@@ -214,7 +228,7 @@ router.post('/', async (req, res) => {
 
     if (orderError) throw orderError;
 
-    const orderItems = items.map((item) => {
+    const orderItems = normalizedItems.map((item) => {
       const rawProductId = item.productId ?? item.id ?? null;
       let resolvedProductId = null;
 
@@ -255,9 +269,11 @@ router.post('/', async (req, res) => {
       completed: normalizedStatus === 'completed' ? 1 : 0,
     };
 
-    updateUserTotals(userId, totalsDelta).catch((err) =>
-      console.error('User total update error:', err),
-    );
+    if (resolvedUserId) {
+      updateUserTotals(resolvedUserId, totalsDelta).catch((err) =>
+        console.error('User total update error:', err),
+      );
+    }
 
     res.json({ order, items: orderItems });
   } catch (error) {
@@ -414,4 +430,3 @@ router.patch('/:id', async (req, res) => {
 });
 
 module.exports = router;
-
