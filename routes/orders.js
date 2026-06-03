@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getSupabase } = require('../lib/supabaseServer');
+const { generateTrackingNumber, normalizeTrackingNumberInput } = require('../lib/trackingNumber');
 const { logActivity } = require('./activities');
 
 let supabase;
@@ -109,6 +110,37 @@ const parseAddressObject = (input) => {
 
 const firstNonEmpty = (...candidates) =>
   candidates.find((value) => typeof value === 'string' && value.trim())?.trim() || null;
+
+const isUniqueTrackingViolation = (error) =>
+  error?.code === '23505' &&
+  (String(error.message || '').toLowerCase().includes('tracking_number') ||
+    String(error.details || '').toLowerCase().includes('tracking_number'));
+
+async function insertOrderWithTracking(insertPayload, maxAttempts = 6) {
+  let lastError = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const tracking_number = generateTrackingNumber();
+    const { data, error } = await supabase
+      .from('orders')
+      .insert({ ...insertPayload, tracking_number })
+      .select()
+      .single();
+
+    if (!error) {
+      return { order: data, error: null };
+    }
+
+    lastError = error;
+    if (!isUniqueTrackingViolation(error)) {
+      return { order: null, error };
+    }
+  }
+
+  return {
+    order: null,
+    error: lastError || new Error('Failed to allocate a unique tracking number'),
+  };
+}
 
 router.post('/', async (req, res) => {
   try {
@@ -220,12 +252,7 @@ router.post('/', async (req, res) => {
       insertPayload.order_notes = orderNotes.trim();
     }
 
-    const { data: order, error: orderError } = await supabase
-      .from('orders')
-      .insert(insertPayload)
-      .select()
-      .single();
-
+    const { order, error: orderError } = await insertOrderWithTracking(insertPayload);
     if (orderError) throw orderError;
 
     const orderItems = normalizedItems.map((item) => {
@@ -330,9 +357,41 @@ router.get('/', async (req, res) => {
   }
 });
 
+/** Public lookup by tracking_number (must be registered before /:id). */
+router.get('/track/:trackingNumber', async (req, res) => {
+  try {
+    const normalized = normalizeTrackingNumberInput(
+      decodeURIComponent(req.params.trackingNumber || ''),
+    );
+    if (!normalized) {
+      return res.status(400).json({ error: 'Invalid tracking number format.' });
+    }
+
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*, order_items(*)')
+      .eq('tracking_number', normalized)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) {
+      return res.status(404).json({ error: 'No order found for this tracking number.' });
+    }
+
+    res.json(data);
+  } catch (error) {
+    console.error('Fetch order by tracking number error:', error);
+    res.status(500).json({ error: error.message || 'Failed to load order' });
+  }
+});
+
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    if (id === 'track') {
+      return res.status(400).json({ error: 'Tracking number is required.' });
+    }
+
     const { data, error } = await supabase
       .from('orders')
       .select('*, order_items(*)')
@@ -430,3 +489,4 @@ router.patch('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
