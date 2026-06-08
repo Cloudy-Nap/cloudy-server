@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { getSupabase } = require('../lib/supabaseServer');
 const { generateTrackingNumber, normalizeTrackingNumberInput } = require('../lib/trackingNumber');
+const { calculateCheckoutTotals } = require('../lib/voucherUtils');
+const { fetchActiveVoucherByCode, redeemVoucherForOrder } = require('./vouchers');
 const { logActivity } = require('./activities');
 
 let supabase;
@@ -161,6 +163,8 @@ router.post('/', async (req, res) => {
       lastName,
       phone,
       phoneNumber,
+      voucherCode,
+      voucher_code: voucherCodeSnake,
     } = req.body;
 
     const normalizedItems = Array.isArray(items) ? items : [];
@@ -233,13 +237,40 @@ router.post('/', async (req, res) => {
       }
     }
 
+    const rawVoucherCode = voucherCode || voucherCodeSnake || null;
+    let voucherRecord = null;
+    let resolvedTotals = {
+      subtotal: Number(totals.subtotal) || 0,
+      tax: Number(totals.tax) || 0,
+      shipping: Number(totals.shipping) || 0,
+      total: Number(totals.total) || 0,
+      discount: Number(totals.discount) || 0,
+    };
+
+    if (rawVoucherCode) {
+      const { voucher, error: voucherError } = await fetchActiveVoucherByCode(rawVoucherCode);
+      if (voucherError) {
+        return res.status(400).json({ error: voucherError });
+      }
+      voucherRecord = voucher;
+      const computed = calculateCheckoutTotals(resolvedTotals.subtotal, voucher.discount_percent);
+      resolvedTotals = {
+        subtotal: computed.subtotal,
+        tax: computed.tax,
+        shipping: computed.shipping,
+        total: computed.total,
+        discount: computed.discount,
+      };
+    }
+
     const insertPayload = {
       user_id: resolvedUserId,
       status: normalizedStatus,
-      subtotal: totals.subtotal || 0,
-      tax: totals.tax || 0,
-      shipping: totals.shipping || 0,
-      total: totals.total || 0,
+      subtotal: resolvedTotals.subtotal,
+      tax: resolvedTotals.tax,
+      shipping: resolvedTotals.shipping,
+      total: resolvedTotals.total,
+      discount: resolvedTotals.discount,
       shipping_address: shippingAddress || null,
       billing_address: billingAddress || null,
       payment_method: paymentMethod || null,
@@ -248,12 +279,25 @@ router.post('/', async (req, res) => {
       customer_phone: resolvedCustomerPhone,
     };
 
+    if (voucherRecord) {
+      insertPayload.voucher_id = voucherRecord.id;
+      insertPayload.voucher_code = voucherRecord.code;
+    }
+
     if (typeof orderNotes === 'string' && orderNotes.trim()) {
       insertPayload.order_notes = orderNotes.trim();
     }
 
     const { order, error: orderError } = await insertOrderWithTracking(insertPayload);
     if (orderError) throw orderError;
+
+    if (voucherRecord) {
+      const redeemed = await redeemVoucherForOrder(voucherRecord.id, order.id);
+      if (!redeemed) {
+        await supabase.from('orders').delete().eq('id', order.id);
+        return res.status(409).json({ error: 'This voucher was just used. Please try again without it.' });
+      }
+    }
 
     const orderItems = normalizedItems.map((item) => {
       const rawProductId = item.productId ?? item.id ?? null;

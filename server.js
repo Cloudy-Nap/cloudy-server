@@ -14,11 +14,12 @@ const cmsAuthRoutes = require('./routes/cmsAuth');
 const activitiesRoutes = require('./routes/activities');
 const { publicRouter: categoryDiscountsPublic, cmsRouter: categoryDiscountsCms } = require('./routes/categoryDiscounts');
 const catalogDealsRoutes = require('./routes/catalogDeals');
+const { publicRouter: vouchersPublic, cmsRouter: vouchersCms } = require('./routes/vouchers');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
+// Middleware — any origin (`*`). Browsers disallow credentials + wildcard together.
 app.use(
   cors({
     origin: '*',
@@ -46,10 +47,12 @@ app.use('/api/scanners', scannerRoutes);
 app.use('/api/catalog', catalogRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/discounts', categoryDiscountsPublic);
+app.use('/api/vouchers', vouchersPublic);
 // Register before `/api/cms` catch-all style routes
 app.use('/api/cms/activities', activitiesRoutes);
 app.use('/api/cms/discounts', categoryDiscountsCms);
 app.use('/api/cms/deals', catalogDealsRoutes);
+app.use('/api/cms/vouchers', vouchersCms);
 app.use('/api/cms', cmsAuthRoutes);
 
 // Health check endpoint
