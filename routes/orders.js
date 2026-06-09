@@ -50,6 +50,11 @@ const isPendingStatus = (status) => {
   return normalized === 'pending' || normalized === 'in_progress';
 };
 
+const isCancelledStatus = (status) => {
+  const normalized = normalizeStatus(status);
+  return normalized === 'cancelled' || normalized === 'canceled' || normalized.includes('cancel');
+};
+
 const updateUserTotals = async (userId, delta) => {
   const toNumber = (value) => {
     const num = Number(value);
@@ -529,6 +534,60 @@ router.patch('/:id', async (req, res) => {
   } catch (error) {
     console.error('Update order error:', error);
     res.status(500).json({ error: error.message || 'Failed to update order' });
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: existingOrder, error: existingError } = await supabase
+      .from('orders')
+      .select('id, user_id, status')
+      .eq('id', id)
+      .single();
+
+    if (existingError) {
+      if (existingError.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+      throw existingError;
+    }
+
+    if (!isCancelledStatus(existingOrder.status)) {
+      return res.status(400).json({
+        error: 'Only cancelled orders can be deleted. Set the order status to cancelled first.',
+      });
+    }
+
+    const { error: deleteError } = await supabase.from('orders').delete().eq('id', id);
+    if (deleteError) throw deleteError;
+
+    if (existingOrder?.user_id) {
+      const previousStatus = normalizeStatus(existingOrder.status);
+      const delta = {
+        totalorders: -1,
+        pending: isPendingStatus(previousStatus) ? -1 : 0,
+        completed: previousStatus === 'completed' ? -1 : 0,
+      };
+      updateUserTotals(existingOrder.user_id, delta).catch((err) =>
+        console.error('User totals update error:', err),
+      );
+    }
+
+    await logActivity({
+      type: 'order_deleted',
+      action: `Deleted cancelled order #${id}`,
+      entityType: 'order',
+      entityId: id,
+      entityName: `Order #${id}`,
+      details: { orderId: id, previousStatus: existingOrder.status },
+    }, req);
+
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('Delete order error:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete order' });
   }
 });
 
