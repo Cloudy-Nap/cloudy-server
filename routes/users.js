@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getSupabase } = require('../lib/supabaseServer');
+const { logActivity } = require('./activities');
 
 let supabase;
 try {
@@ -14,6 +15,76 @@ router.use((req, res, next) => {
     return res.status(503).json({ error: 'Database not configured for user API.' });
   }
   next();
+});
+
+// Create customer (CMS)
+router.post('/', async (req, res) => {
+  try {
+    const { email, password, phone, address, firstName, lastName } = req.body;
+
+    const resolvedFirstName = (req.body.first_name || firstName || '').trim();
+    const resolvedLastName = (req.body.last_name || lastName || '').trim();
+
+    if (!email || !String(email).trim()) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+
+    if (!password || String(password).trim().length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+
+    const originalEmail = String(email).trim();
+    const normalizedEmail = originalEmail.toLowerCase();
+
+    const { data: existingUsers, error: existingError } = await supabase
+      .from('users')
+      .select('id, email')
+      .ilike('email', normalizedEmail)
+      .limit(1);
+
+    if (existingError) {
+      return res.status(400).json({ error: existingError.message });
+    }
+
+    if (Array.isArray(existingUsers) && existingUsers.length > 0) {
+      return res.status(400).json({ error: 'An account with this email already exists.' });
+    }
+
+    const insertPayload = {
+      email: originalEmail,
+      password: String(password).trim(),
+      first_name: resolvedFirstName || null,
+      last_name: resolvedLastName || null,
+    };
+
+    if (phone && String(phone).trim()) insertPayload.phone = String(phone).trim();
+    if (address && String(address).trim()) insertPayload.address = String(address).trim();
+
+    const { data, error } = await supabase.from('users').insert(insertPayload).select('*').single();
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    const displayName = [data.first_name, data.last_name].filter(Boolean).join(' ').trim() || data.email;
+
+    await logActivity(
+      {
+        type: 'user_created',
+        action: `Created customer: ${displayName}`,
+        entityType: 'user',
+        entityId: data.id,
+        entityName: displayName,
+        details: { email: data.email },
+      },
+      req,
+    );
+
+    res.status(201).json({ user: data });
+  } catch (error) {
+    console.error('Create user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Get user by ID

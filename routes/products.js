@@ -2773,4 +2773,136 @@ router.patch('/:category/:id', upload.array('images', 10), async (req, res) => {
   }
 });
 
+const VARIANT_TABLE_BY_CATEGORY = {
+  bed: { table: 'product_variants_bed', fk: 'product_id' },
+  sofacumbed: { table: 'product_variants_sofacumbed', fk: 'product_id' },
+  furniture: { table: 'product_variants_furniture', fk: 'furniture_id' },
+};
+
+const findDealReferencingProduct = async (productId, catalogType) => {
+  const { data, error } = await supabase.from('catalog_deals').select('id, title, items');
+  if (error) throw error;
+
+  const idStr = String(productId);
+  for (const deal of data || []) {
+    const items = Array.isArray(deal.items) ? deal.items : [];
+    if (
+      items.some(
+        (item) =>
+          String(item?.product_id) === idStr &&
+          String(item?.catalog_type || '').toLowerCase() === String(catalogType).toLowerCase(),
+      )
+    ) {
+      return deal;
+    }
+  }
+  return null;
+};
+
+const deleteCloudynapProduct = async (category, lookupId) => {
+  const tableName = CLOUDYNAP_TABLE[category];
+  const { data: existingRow, error: existingError } = await supabase
+    .from(tableName)
+    .select('id, name')
+    .eq('id', lookupId)
+    .maybeSingle();
+
+  if (existingError) throw existingError;
+  if (!existingRow) return null;
+
+  const blockingDeal = await findDealReferencingProduct(lookupId, category);
+  if (blockingDeal) {
+    const err = new Error(
+      `This product is used in deal "${blockingDeal.title || blockingDeal.id}". Remove it from the deal first.`,
+    );
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const variantConfig = VARIANT_TABLE_BY_CATEGORY[category];
+  if (variantConfig) {
+    const { error: variantError } = await supabase
+      .from(variantConfig.table)
+      .delete()
+      .eq(variantConfig.fk, lookupId);
+    if (variantError) throw variantError;
+  }
+
+  const { error: deleteError } = await supabase.from(tableName).delete().eq('id', lookupId);
+  if (deleteError) throw deleteError;
+
+  return { ...existingRow, category };
+};
+
+const deleteLegacyProduct = async (category, lookupId) => {
+  let tableName;
+  if (category === 'printer') tableName = 'printers';
+  else if (category === 'scanner') tableName = 'scanners';
+  else tableName = 'laptops';
+
+  const { data: existingRow, error: existingError } = await supabase
+    .from(tableName)
+    .select('id, name')
+    .eq('id', lookupId)
+    .maybeSingle();
+
+  if (existingError) throw existingError;
+  if (!existingRow) return null;
+
+  const { error: deleteError } = await supabase.from(tableName).delete().eq('id', lookupId);
+  if (deleteError) throw deleteError;
+
+  return { ...existingRow, category };
+};
+
+router.delete('/:category/:id', async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+
+    const categoryParam = normalizeString(req.params.category).toLowerCase();
+    const cloudCat = resolveCloudynapCategoryParam(categoryParam);
+    const lookupId = parseLookupId(req.params.id);
+
+    let deletedProduct = null;
+
+    if (cloudCat) {
+      deletedProduct = await deleteCloudynapProduct(cloudCat, lookupId);
+    } else {
+      let legacyCategory;
+      if (categoryParam === 'printer' || categoryParam === 'printers') legacyCategory = 'printer';
+      else if (categoryParam === 'scanner' || categoryParam === 'scanners') legacyCategory = 'scanner';
+      else if (categoryParam === 'laptop' || categoryParam === 'laptops') legacyCategory = 'laptop';
+      else return res.status(400).json({ error: 'Invalid product category.' });
+
+      deletedProduct = await deleteLegacyProduct(legacyCategory, lookupId);
+    }
+
+    if (!deletedProduct) {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
+
+    await logActivity(
+      {
+        type: 'product_deleted',
+        action: `Deleted ${deletedProduct.category}: ${deletedProduct.name || lookupId}`,
+        entityType: 'product',
+        entityId: lookupId,
+        entityName: deletedProduct.name || String(lookupId),
+        details: { category: deletedProduct.category },
+      },
+      req,
+    );
+
+    res.json({ message: 'Product deleted successfully.', id: lookupId });
+  } catch (err) {
+    console.error('Delete product error:', err);
+    if (err?.statusCode === 409) {
+      return res.status(409).json({ error: err.message });
+    }
+    res.status(500).json({ error: err?.message || 'Failed to delete product.' });
+  }
+});
+
 module.exports = router;
