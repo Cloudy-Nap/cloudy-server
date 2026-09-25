@@ -324,11 +324,13 @@ const normalizeBedVariantForDb = (entry) => {
   if (!entry || typeof entry !== 'object') return null;
   const price = coercePriceValue(entry.price);
   if (price === null) return null;
+  const sizeName = normalizeString(entry.size_name ?? entry.sizeName);
   return {
     width: pickCloudynapInt(entry, entry, 'width'),
     height: pickCloudynapInt(entry, entry, 'height'),
     length: pickCloudynapInt(entry, entry, 'length'),
     price: Math.round(price),
+    size_name: sizeName || null,
   };
 };
 
@@ -342,6 +344,7 @@ const replaceBedVariants = async (productId, normalizedVariants) => {
     height: v.height,
     length: v.length,
     price: v.price,
+    size_name: v.size_name || null,
   }));
   const { error: insErr } = await supabase.from('product_variants_bed').insert(rows);
   if (insErr) throw insErr;
@@ -365,11 +368,13 @@ const fetchBedWithVariants = async (id) => {
 const sanitizedRowToBedVariant = (sanitized) => {
   const price = coercePriceValue(sanitized.price);
   if (price === null) return null;
+  const sizeName = normalizeString(sanitized.size_name ?? sanitized.sizeName);
   return {
     width: pickCloudynapInt(sanitized, sanitized, 'width'),
     height: pickCloudynapInt(sanitized, sanitized, 'height'),
     length: pickCloudynapInt(sanitized, sanitized, 'length'),
     price: Math.round(price),
+    size_name: sizeName || null,
   };
 };
 
@@ -950,6 +955,7 @@ const CLOUDYNAP_CSV_ALLOWED = {
     'length',
     'width',
     'height',
+    'size_name',
     'series',
     'features',
     'benefits',
